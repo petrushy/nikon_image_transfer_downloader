@@ -208,15 +208,77 @@ NIC_DEST_DIR   # local destination root
 - Presigned download URLs are likely short-lived; download soon after listing.
 - Surface auth / region / UA errors clearly.
 
-## 8. Suggested implementation notes (non-binding)
+## 8. User interface
 
-- A language with good cross-platform support, an HTTP client, and headless-browser
-  automation for the login step (e.g. Python + Playwright, or Go + a browser-driver for
-  the token-capture phase only) fits the constraints well.
+### Framework: NiceGUI
+
+The GUI uses **[NiceGUI](https://nicegui.io)** (Python, async, built on FastAPI).
+Rationale:
+
+- **Async-native** — matches Playwright's async API (login/token capture) and lets the
+  poll loop run as an `asyncio` background task without blocking the UI.
+- **Real event model** (not full-page reruns) — supports live progress bars, streaming
+  logs, and a responsive thumbnail grid with selection.
+- **Browser or native window** — the same code can run in the browser or as a desktop
+  window (via `pywebview`); cross-platform (Linux/macOS/Windows).
+
+> Streamlit is a viable simpler fallback, but its rerun-on-interaction model is awkward
+> for live progress and long-running tasks, so NiceGUI is preferred.
+
+### Architecture: engine vs. UI (keep separate)
+
+- **Core engine** — headless, dependency-free of the GUI: auth/token store, API client,
+  lister, downloader, sync state/manifest, and the poll scheduler. Must run standalone
+  as the service/daemon (§7 run modes) with **no GUI required** (important for headless
+  Linux).
+- **NiceGUI front-end** — an *optional* control panel over the engine. It triggers engine
+  actions and visualises state; it must not own core logic. Because NiceGUI is async,
+  the poller can run in-process beside the UI when the GUI is used, or as a separate
+  process/service otherwise.
+
+### Login integration (Option 1 — preferred, per feedback)
+
+NiceGUI **cannot** host Nikon's login in its own tab (cross-origin + Nikon's CSP
+`frame-ancestors` forbid framing, and JS can't read a cross-origin token). Instead:
+
+1. User clicks **"Log in to Nikon"** in the NiceGUI app.
+2. The engine launches a **headed Playwright browser window** to the NCAS login URL
+   (`accounts.cld.nikon.com/login?service_id=nic_local`).
+3. User completes login there; Playwright intercepts network traffic and captures the
+   `access_token` (+ refresh token).
+4. Token is persisted to the secret store; NiceGUI shows **"Connected"** and refreshes
+   transparently thereafter.
+5. **Manual token paste** remains a fallback input field for when browser automation is
+   unavailable.
+
+### Screens / components (initial scope)
+
+- **Connection / login:** login button + status (connected / token expiry), account email.
+- **Settings:** destination root, `country`, poll interval, file-format filter
+  (All / RAW `.NEF` / JPEG), optional camera filter. Backed by the §4 config keys.
+- **Images:** paged thumbnail grid (`thumbnail_file_url`) with per-item metadata
+  (name, camera, shooting date, size, expiry/`lifetime`); checkboxes to select items;
+  "select all". First milestone may simply mirror all.
+- **Sync:** Start / Stop, per-file and overall progress, a live log, and counts
+  (queued / downloaded / skipped / failed).
+- **Service status:** when running as a poller — last poll time, next poll, items found.
+
+### UI requirements
+
+- Never expose the password in the UI after entry; show only connection state.
+- Long operations run as background tasks; the UI stays responsive (no blocking calls).
+- Clear surfacing of auth / region / User-Agent / rate-limit errors.
+- The app must be fully usable headless (engine + CLI/service) without launching NiceGUI.
+
+## 9. Suggested implementation notes (non-binding)
+
+- **Python** fits all constraints: NiceGUI (UI) + Playwright (login/token capture) +
+  `httpx`/`requests` (API & downloads), cross-platform.
 - Keep the auth/token-capture concern isolated behind an interface so it can be swapped
   (manual paste → headless login → full PKCE) without touching the sync logic.
+- Keep the core engine importable and runnable independently of NiceGUI.
 
-## 9. Open questions to resolve via live traffic capture
+## 10. Open questions to resolve via live traffic capture
 
 1. Exact OIDC realm and `client_id` (runtime-loaded; capture from a logged-in session).
 2. Whether the operation code (e.g. `IF_FR100_H07`) is an actual request header.
@@ -227,7 +289,7 @@ NIC_DEST_DIR   # local destination root
 6. Precise token refresh mechanics for unattended service mode.
 7. Rate limits / throttling thresholds.
 
-## 10. Legal / ToS note
+## 11. Legal / ToS note
 
 This uses undocumented, unsupported endpoints. Intended scope is a user downloading
 **their own** images from **their own** account for personal backup. Automated access
