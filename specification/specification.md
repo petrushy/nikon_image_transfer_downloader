@@ -61,6 +61,17 @@ OIDC (Keycloak) behind Nikon's NCAS gateway:
 - The resulting **access token is passed to the data API in a custom header named
   `access_token`** (NOT `Authorization: Bearer`).
 
+**Confirmed by live capture (2026-06-15):**
+- Token endpoint: `https://auth.accounts.cld.nikon.com/auth/realms/user/protocol/openid-connect/token`
+  (realm = `user`).
+- `client_id` = `c0004`.
+- Access token lifetime `expires_in` = **300 s** (5 minutes); a `refresh_token`
+  is issued, so unattended refresh via the refresh-token grant works.
+- **Refresh tokens rotate**: each refresh invalidates the previous refresh
+  token and returns a new one. The persisted session **must** be overwritten
+  with the rotated token after every refresh, or the next refresh gets HTTP
+  400. (The engine does this; ad-hoc scripts that don't will burn the token.)
+
 ### Authentication strategy for this tool (to decide — see §9)
 
 The realm/client_id are runtime-loaded and login sits behind Nikon's branded gateway, so
@@ -120,42 +131,64 @@ NIC_DEST_DIR   # local destination root
 
 ```json
 {
-  "country": "<country code>",
-  "offset": 0,
-  "limit": 50,
+  "country": "SE",
+  "offset": 1,
+  "limit": 20,
   "thirdpcs_list": [],
   "device_id_list": [],
   "file_format_id_list": [],
-  "lifetime": "<filter>",
+  "lifetime": 30,
   "sort_condition": "0",
-  "sort_desc": "true"
+  "sort_desc": "1"
 }
 ```
 
-- Pagination is **offset / limit** based.
-- `device_id_list` filters by camera; `file_format_id_list` filters by file type
-  (the UI exposes `format_jpeg` / `format_raw` — relevant for selecting `.NEF` RAW files).
-- `thirdpcs_list` relates to third-party cloud storage targets (not needed for local
-  download).
+- Pagination: **`offset` is a 1-based *item* offset**, not a page number.
+  `offset=1` returns items 1..`limit`; the next window is `offset + limit`
+  (i.e. 1, 21, 41, …). `offset=0` is rejected with HTTP 500. Empty results
+  mark the end. *(Confirmed live; an earlier "page number" reading was wrong.)*
+- `limit` max ~20: the web app uses 20, and `limit=300` is rejected with 500.
+- Types are strict: `offset`/`limit`/`lifetime` are **integers**,
+  `sort_condition`/`sort_desc` are **strings**. Sending the wrong type, or an
+  out-of-range `lifetime` (e.g. 365), returns HTTP 400/500 with `error_code`.
+- Confirmed default body sent by the web app: `country=SE` (region-specific),
+  `limit=20`, `lifetime=30`, `sort_condition="0"`, `sort_desc="1"`, with the
+  three filter lists empty.
+- `device_id_list` filters by camera; `file_format_id_list` filters by file
+  type. `thirdpcs_list` targets third-party cloud storage (not needed here).
 
-**Response** (shape `{"item_list": [ ... ]}`), each item observed to include:
+**Response** — the image array is **nested under `item_info`**, not top-level:
+
+```json
+{
+  "item_info": { "total_items_count": <int>, "item_list": [ ... ] },
+  "camera": [...], "service": [...], "transferStatus": {...},
+  "getUploadlimitInfo": {...}, "excluded_transfer_files_list": [...]
+}
+```
+
+`total_items_count` is the count *in this window* (== returned length), **not**
+the grand total, so iterate until a short window. Each item in `item_list`
+(field names as seen live):
 
 | Field | Meaning |
 |-------|---------|
-| `id` | Image identifier |
-| `name` | File name |
-| `device_name` | Camera that captured it |
-| `file_extension` | e.g. `jpg`, `nef`, `wav` |
+| `id` | Image identifier (ULID) |
+| `name` | Full file name incl. extension, e.g. `_NZF5080.NEF` |
+| `file_extension` | **Category**, e.g. `RAW`, `JPEG` (not the literal ext) |
 | `original_file_url` | **Direct download URL for the full-resolution file** |
-| `original_file_size` | Size of the original file |
 | `thumbnail_file_url` | Thumbnail download URL |
-| `image_size` | Image dimensions/size info |
-| `upload_date` | When uploaded to the cloud |
-| `shooting_date` | Capture timestamp (drives the YYYY/MM/DD layout) |
-| `lifetime` | Storing period (item expires after this) |
-| `picture_control_name` | Picture Control applied |
-| `thirdpcs_transfer_status_list` | Per third-party-cloud transfer status `[{id, transfer_status}]` |
-| `c2pa_manifest_existance` | Whether a C2PA content-authenticity manifest exists (`"0"`/`"1"`) |
+| `thumbnail_file_status` | Thumbnail availability flag |
+| `device_name` | Camera that captured it, e.g. `NIKON Z f` |
+| `upload_date` | ISO-8601 w/ ms + offset, e.g. `...+02:00` |
+| `shooting_date` | ISO-8601 capture time (drives the YYYY/MM/DD layout) |
+| `lifetime` | Remaining storing period in days (e.g. `29`) |
+| `picture_control_name` | Picture Control applied, e.g. `AUTO` |
+| `thirdpcs_transfer_status_list` | Per third-party-cloud transfer status |
+| `c2pa_manifest_existance` | C2PA manifest present (`"0"`/`"1"`) |
+
+Note: `original_file_size` / `image_size` (seen in the JS bundle) are **not**
+present in the live list response, so size-based checks must be optional.
 
 ## 7. Application behaviour
 
@@ -278,16 +311,31 @@ NiceGUI **cannot** host Nikon's login in its own tab (cross-origin + Nikon's CSP
   (manual paste → headless login → full PKCE) without touching the sync logic.
 - Keep the core engine importable and runnable independently of NiceGUI.
 
-## 10. Open questions to resolve via live traffic capture
+## 10. Open questions
 
-1. Exact OIDC realm and `client_id` (runtime-loaded; capture from a logged-in session).
-2. Whether the operation code (e.g. `IF_FR100_H07`) is an actual request header.
-3. Exact allowed/required values for `country`, `sort_condition`, `lifetime`,
-   `file_format_id_list`, and the `device_id` format.
-4. Pagination limits (max `limit`; whether a total-count field exists to know when to stop).
-5. Expiry/lifetime of `original_file_url` presigned links and of the access token.
-6. Precise token refresh mechanics for unattended service mode.
-7. Rate limits / throttling thresholds.
+**Resolved by live capture (2026-06-15):**
+- ✅ OIDC realm = `user`, `client_id` = `c0004` (see §4).
+- ✅ Access token lifetime = 300 s; refresh-token grant works for unattended
+  refresh (see §4).
+- ✅ Pagination: `offset` is a 1-based **item** offset (step by `limit`),
+  `offset=0` → HTTP 500, empty result ends iteration (see §6).
+- ✅ Confirmed default body values + strict types: `country=SE`, `limit=20`
+  (max ~20), `lifetime=30` (int), `sort_condition="0"`/`sort_desc="1"` (str).
+- ✅ The operation code (`IF_FR100_H07`) is **not** required as a request header
+  — replaying the captured URL + body + `access_token` returns HTTP 200.
+- ✅ Response nesting + item schema confirmed live: images are under
+  `item_info.item_list`; `file_extension` is a category (`RAW`/`JPEG`);
+  `original_file_url`/`thumbnail_file_url` present; `original_file_size` is
+  **absent** from the list response (see §6).
+- ✅ Refresh tokens **rotate** — persist the new one each refresh (see §4).
+
+**Still open:**
+1. `file_format_id_list` id values (RAW vs JPEG) and `device_id` format — to
+   enable server-side filtering instead of client-side category matching.
+2. **End-to-end download not yet exercised**: listing/paging/auth are verified
+   against the live account (211 images), but no `original_file_url` has been
+   downloaded yet, so file integrity / presigned-URL expiry are unconfirmed.
+3. Rate limits / throttling thresholds for bulk download of all items.
 
 ## 11. Legal / ToS note
 

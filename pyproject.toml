@@ -1,0 +1,22 @@
+[project]
+name = "nikon-image-transfer-downloader"
+version = "0.1.0"
+description = "One-way downloader/sync for images stored in Nikon Imaging Cloud."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "playwright>=1.44",
+    "nicegui>=1.4",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+nikon-downloader = "nikon_downloader.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
