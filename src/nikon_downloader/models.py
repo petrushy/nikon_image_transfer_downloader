@@ -61,22 +61,29 @@ class ImageItem:
 
     id: str
     name: str
-    file_extension: str
+    file_extension: str  # category string: "RAW" or "JPEG" (not the literal ext)
     original_file_url: str | None
     original_file_size: int | None
     thumbnail_file_url: str | None
     device_name: str
     shooting_date: datetime | None
     upload_date: datetime | None
+    lifetime: int | None  # remaining days before the image expires from the cloud
     raw: dict  # the untouched source object, for debugging / future fields
 
     @classmethod
     def from_api(cls, data: dict) -> "ImageItem":
         size = data.get("original_file_size")
         try:
-            size = int(size) if size not in (None, "") else None
+            size = int(size) if size is not None else None
         except (TypeError, ValueError):
             size = None
+
+        lt = data.get("lifetime")
+        try:
+            lt = int(lt) if lt is not None else None
+        except (TypeError, ValueError):
+            lt = None
 
         return cls(
             id=str(data.get("id", "")),
@@ -88,6 +95,7 @@ class ImageItem:
             device_name=str(data.get("device_name", "")),
             shooting_date=parse_timestamp(data.get("shooting_date")),
             upload_date=parse_timestamp(data.get("upload_date")),
+            lifetime=lt,
             raw=data,
         )
 

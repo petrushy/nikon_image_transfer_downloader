@@ -1,11 +1,13 @@
 """Downloads image files into a YYYY/MM/DD directory layout, with resume.
 
-A small JSON manifest records which item ids have been downloaded (plus size
-and path) so re-runs are idempotent and interrupted runs resume safely.
+A small JSON manifest records which item ids have been downloaded (plus
+size and path) so re-runs are idempotent and interrupted runs resume
+safely.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -28,9 +30,13 @@ class Manifest:
         self._entries: dict[str, dict] = {}
         if path.is_file():
             try:
-                self._entries = json.loads(path.read_text(encoding="utf-8"))
+                self._entries = json.loads(
+                    path.read_text(encoding="utf-8")
+                )
             except (json.JSONDecodeError, ValueError):
-                log.warning("Ignoring unreadable manifest at %s", path)
+                log.warning(
+                    "Ignoring unreadable manifest at %s", path
+                )
 
     def has(self, item: ImageItem) -> bool:
         """Whether this item is already recorded with a matching size."""
@@ -64,6 +70,14 @@ class DownloadResult:
     error: str | None = None
 
 
+def build_target_path(item: ImageItem, dest_dir: Path) -> Path:
+    """Return the local path where ``item`` would be (or is) stored."""
+    date = item.effective_date
+    sub = date.strftime("%Y/%m/%d") if date else "unknown-date"
+    name = item.name or f"{item.id}.{item.file_extension or 'bin'}"
+    return dest_dir / sub / name
+
+
 class Downloader:
     """Downloads items via their presigned ``original_file_url``."""
 
@@ -75,14 +89,18 @@ class Downloader:
         self._http = http
 
     def target_path(self, item: ImageItem) -> Path:
-        """Build ``dest/YYYY/MM/DD/name`` from the item's effective date."""
-        date = item.effective_date
-        sub = date.strftime("%Y/%m/%d") if date else "unknown-date"
-        name = item.name or f"{item.id}.{item.file_extension or 'bin'}"
-        return self.dest_dir / sub / name
+        return build_target_path(item, self.dest_dir)
 
-    async def download(self, item: ImageItem) -> DownloadResult:
+    async def download(
+        self, item: ImageItem, retries: int = 3
+    ) -> DownloadResult:
+        """Download one item, skipping if already present.
+
+        Retries up to ``retries`` times on transient errors using
+        exponential backoff (1 s, 2 s, 4 s …).
+        """
         if self.manifest.has(item):
+            log.debug("Skip %s (recorded in manifest)", item.name)
             return DownloadResult(item, "skipped")
         if not item.original_file_url:
             return DownloadResult(item, "failed", error="no download URL")
@@ -93,16 +111,29 @@ class Downloader:
             item.original_file_size is None
             or path.stat().st_size == item.original_file_size
         ):
+            log.debug("Skip %s (already on disk at %s)", item.name, path)
             self.manifest.record(item, path)
             return DownloadResult(item, "skipped", path=path)
 
-        try:
-            await self._stream_to_file(item.original_file_url, path)
-        except (httpx.HTTPError, OSError) as exc:
-            return DownloadResult(item, "failed", error=str(exc))
+        last_error = "unknown error"
+        for attempt in range(max(1, retries)):
+            if attempt > 0:
+                await asyncio.sleep(2.0 ** (attempt - 1))
+            try:
+                await self._stream_to_file(item.original_file_url, path)
+                self.manifest.record(item, path)
+                return DownloadResult(item, "downloaded", path=path)
+            except (httpx.HTTPError, OSError) as exc:
+                last_error = str(exc)
+                log.debug(
+                    "Attempt %d/%d failed for %s: %s",
+                    attempt + 1,
+                    retries,
+                    item.name,
+                    exc,
+                )
 
-        self.manifest.record(item, path)
-        return DownloadResult(item, "downloaded", path=path)
+        return DownloadResult(item, "failed", error=last_error)
 
     async def _stream_to_file(self, url: str, path: Path) -> None:
         """Stream a URL to disk via a ``.part`` temp file, then rename."""

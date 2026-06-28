@@ -9,6 +9,8 @@ dependencies = [
     "playwright>=1.44",
     "nicegui>=1.4",
     "pyyaml>=6.0",
+    "rich>=13.0",
+    "click>=8.1",
 ]
 
 [project.scripts]
