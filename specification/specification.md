@@ -303,6 +303,196 @@ NiceGUI **cannot** host Nikon's login in its own tab (cross-origin + Nikon's CSP
 - Clear surfacing of auth / region / User-Agent / rate-limit errors.
 - The app must be fully usable headless (engine + CLI/service) without launching NiceGUI.
 
+
+
+### 8.1 Command-line interface
+
+The tool exposes a first-class CLI for scripting, headless/server use, and manual
+control without the GUI. The CLI drives the same core engine as the GUI and is available
+on all supported platforms.
+
+**Invocation:**
+
+```
+nikon_transfer [--config PATH] [--verbose] [--json] [--no-color] <command> [options]
+```
+
+**Global options:**
+
+| Flag | Description |
+|------|-------------|
+| `--config PATH` | Path to config file (default: `~/.nikon_transfer/config.toml`) |
+| `--verbose`, `-v` | Increase log verbosity (repeat for more: `-vv`) |
+| `--json` | Emit all output as JSON — applies to every command |
+| `--no-color` | Disable ANSI colour (also auto-disabled when stdout is not a TTY) |
+
+---
+
+#### `auth` — manage authentication
+
+```
+nikon_transfer auth login        # Open a browser window to authenticate via NCAS
+nikon_transfer auth logout       # Revoke and delete all stored tokens
+nikon_transfer auth status       # Show current auth state, account email, token expiry
+```
+
+`auth login` launches a headed Playwright browser to the NCAS login page
+(`accounts.cld.nikon.com/login?service_id=nic_local`), waits for the user to complete
+login, captures the access and refresh tokens, and persists them to the OS secret store.
+Prints `Authenticated as <email>` on success.
+
+Example output:
+
+```
+$ nikon_transfer auth status
+Status:    Connected
+Account:   user@example.com
+Token:     expires in 4 min 32 s  (auto-refreshed)
+```
+
+---
+
+#### `list` — list images in Nikon Imaging Cloud
+
+```
+nikon_transfer list [options]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--format FORMAT` | `table` | Output format: `table`, `json`, `csv` |
+| `--filter-type RAW\|JPEG\|ALL` | `ALL` | Filter by file category |
+| `--filter-camera DEVICE_ID` | — | Restrict to a specific camera |
+| `--date-from YYYY-MM-DD` | — | Include only images shot on or after this date |
+| `--date-to YYYY-MM-DD` | — | Include only images shot on or before this date |
+| `--sort date\|name` | `date` | Sort field |
+| `--asc` | — | Ascending sort (default: descending) |
+| `--limit N` | unlimited | Stop after N items |
+
+Default `table` output:
+
+```
+$ nikon_transfer list --filter-type RAW
+  ID (short)   NAME              CAMERA       SHOT DATE    TYPE   LIFETIME
+  01J3…4A      _NZF5082.NEF      NIKON Z f    2026-06-12   RAW    29 d
+  01J2…9C      _NZF5081.NEF      NIKON Z f    2026-06-11   RAW     6 d   ← yellow
+  01J1…2B      _NZF5080.NEF      NIKON Z f    2026-06-10   RAW     2 d   ← red
+
+3 images  (211 total on cloud, 3 match filter)
+```
+
+Lifetime colour coding: ≤ 3 days → red, ≤ 7 days → yellow. Suppressed by `--no-color`
+or when output is piped.
+
+---
+
+#### `download` — download images to local disk
+
+```
+nikon_transfer download [options] [ID ...]
+```
+
+Positional `ID ...` arguments: one or more image IDs to download specifically. If
+omitted, downloads all images matching the active filter options (a full sync pass).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dest PATH` | `NIC_DEST_DIR` | Override the destination root for this run |
+| `--filter-type RAW\|JPEG\|ALL` | `ALL` | File-category filter |
+| `--filter-camera DEVICE_ID` | — | Camera filter |
+| `--date-from YYYY-MM-DD` | — | Lower bound on `shooting_date` |
+| `--date-to YYYY-MM-DD` | — | Upper bound on `shooting_date` |
+| `--dry-run` | — | Print what would be downloaded; write nothing |
+| `--concurrency N` | `3` | Parallel download workers |
+| `--retries N` | `3` | Per-file retry attempts on transient errors |
+
+Files are placed under `<dest>/YYYY/MM/DD/<filename>` derived from `shooting_date`,
+preserving the original filename. Already-present files are skipped (idempotent).
+
+Progress output:
+
+```
+$ nikon_transfer download --filter-type RAW --dest /photos
+Downloading 42 RAW files to /photos …
+[████████████░░░░░░░░]  12/42  _NZF5081.NEF  28.4 MB / 31.2 MB
+Done: 42 downloaded, 7 skipped (already present), 0 failed.
+```
+
+With `--dry-run`:
+
+```
+$ nikon_transfer download --dry-run --filter-type RAW
+Would download 42 files (1.3 GB).  Run without --dry-run to proceed.
+```
+
+---
+
+#### `sync` — continuous poll loop
+
+Run a background poller that checks for new images on a schedule, downloading them as
+they appear and never re-downloading files already on disk.
+
+```
+nikon_transfer sync [options]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--interval SECONDS` | `300` | Poll interval |
+| `--once` | — | Run exactly one poll cycle then exit (one-shot mode) |
+| `--dest PATH` | `NIC_DEST_DIR` | Override destination root |
+| `--filter-type RAW\|JPEG\|ALL` | `ALL` | File-category filter |
+| `--filter-camera DEVICE_ID` | — | Camera filter |
+
+In continuous mode the command logs one timestamped line per poll cycle and one line per
+downloaded file. Responds to `SIGINT`/`SIGTERM` by completing any in-flight download
+and exiting cleanly.
+
+```
+$ nikon_transfer sync --interval 300 --filter-type RAW
+2026-06-28 09:00:00  Poll #1 — 211 images on cloud, 0 new.
+2026-06-28 09:05:00  Poll #2 — 212 images on cloud, 1 new.
+2026-06-28 09:05:01  Downloading _NZF5083.NEF … done (31.1 MB).
+2026-06-28 09:10:00  Poll #3 — 212 images on cloud, 0 new.
+^C
+Interrupted — finishing current transfer … done. Exiting.
+```
+
+---
+
+#### `config` — manage persistent configuration
+
+```
+nikon_transfer config show              # Print all config values (password masked)
+nikon_transfer config set KEY VALUE     # Persist a config key
+nikon_transfer config get KEY           # Print a single key
+```
+
+Supported keys correspond to the §4 environment variables:
+
+| Key | Env var | Description |
+|-----|---------|-------------|
+| `country` | `NIC_COUNTRY` | Country code sent to the API (e.g. `SE`) |
+| `dest_dir` | `NIC_DEST_DIR` | Local destination root |
+| `poll_interval` | — | Default poll interval for `sync` (seconds) |
+| `file_filter` | — | Default file-type filter (`ALL`, `RAW`, `JPEG`) |
+
+**Precedence (highest wins):** CLI flag → environment variable → config file.
+
+---
+
+#### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Authentication error (missing or expired token — run `auth login`) |
+| 2 | Network or API error |
+| 3 | Configuration error (missing required value) |
+| 4 | Partial failure (one or more files failed after all retries) |
+
+---
+
 ## 9. Suggested implementation notes (non-binding)
 
 - **Python** fits all constraints: NiceGUI (UI) + Playwright (login/token capture) +
