@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import click
+import httpx
 from rich.console import Console
 from rich.table import Table
 
@@ -103,6 +104,16 @@ def _run_async(coro):  # type: ignore[no-untyped-def]
         raise click.ClickException(
             f"Authentication error: {exc}  (run `auth login` first)"
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        body = exc.response.text[:200].strip()
+        _die(2, f"API error (HTTP {status}): {body}")
+    except httpx.TimeoutException as exc:
+        _die(2, f"Request timed out: {exc}")
+    except httpx.NetworkError as exc:
+        _die(2, f"Network error: {exc}")
+    except httpx.HTTPError as exc:
+        _die(2, f"HTTP error: {exc}")
     except KeyboardInterrupt:
         click.echo("\nInterrupted.", err=True)
         raise SystemExit(130) from None
@@ -342,7 +353,8 @@ def cmd_list(
     if limit is not None:
         items = items[:limit]
 
-    _render_list(items, fmt, ctx)
+    # Global --json overrides --format
+    _render_list(items, "json" if ctx.json_mode else fmt, ctx)
 
 
 def _render_list(items: list[ImageItem], fmt: str, ctx: _Ctx) -> None:
@@ -441,9 +453,12 @@ def _render_list(items: list[ImageItem], fmt: str, ctx: _Ctx) -> None:
 )
 @click.option(
     "--filter-type",
-    default="ALL",
+    default=None,
     type=_TYPE_CHOICE,
-    show_default=True,
+    help=(
+        "File category to process: ALL, RAW, or JPEG. "
+        "Default: value of file_filter in config (fallback: ALL)."
+    ),
 )
 @click.option("--filter-camera", default=None, metavar="DEVICE")
 @click.option(
@@ -476,7 +491,7 @@ def cmd_download(
     ctx: _Ctx,
     ids: tuple[str, ...],
     dest: str | None,
-    filter_type: str,
+    filter_type: str | None,
     filter_camera: str | None,
     date_from: datetime | None,
     date_to: datetime | None,
@@ -489,14 +504,16 @@ def cmd_download(
     Pass one or more IDs to download specific images; omit them to
     download everything matching the filter options.
     """
+    dest_override = {"dest_dir": dest} if dest else {}
+    settings = ctx.settings(**dest_override)
+    engine = SyncEngine(settings)
+    effective_type = (filter_type or settings.file_format).lower()
     filt = SyncFilter(
-        file_type=filter_type.lower(),
+        file_type=effective_type,
         camera=filter_camera,
         date_from=date_from.date() if date_from else None,
         date_to=date_to.date() if date_to else None,
     )
-    dest_override = {"dest_dir": dest} if dest else {}
-    engine = ctx.engine(**dest_override)
 
     if dry_run:
         settings = ctx.settings(**dest_override)
@@ -611,9 +628,12 @@ def cmd_download(
 @click.option("--dest", default=None, metavar="PATH")
 @click.option(
     "--filter-type",
-    default="ALL",
+    default=None,
     type=_TYPE_CHOICE,
-    show_default=True,
+    help=(
+        "File category to sync: ALL, RAW, or JPEG. "
+        "Default: value of file_filter in config (fallback: ALL)."
+    ),
 )
 @click.option("--filter-camera", default=None, metavar="DEVICE")
 @click.pass_obj
@@ -622,7 +642,7 @@ def cmd_sync(
     interval: int,
     run_once: bool,
     dest: str | None,
-    filter_type: str,
+    filter_type: str | None,
     filter_camera: str | None,
 ) -> None:
     """Poll Nikon Imaging Cloud and download new images.
@@ -631,12 +651,14 @@ def cmd_sync(
     Responds to SIGINT/SIGTERM by completing the current download
     then exiting cleanly.
     """
+    dest_override = {"dest_dir": dest} if dest else {}
+    settings = ctx.settings(poll_interval=interval, **dest_override)
+    engine = SyncEngine(settings)
+    effective_type = (filter_type or settings.file_format).lower()
     filt = SyncFilter(
-        file_type=filter_type.lower(),
+        file_type=effective_type,
         camera=filter_camera,
     )
-    dest_override = {"dest_dir": dest} if dest else {}
-    engine = ctx.engine(poll_interval=interval, **dest_override)
 
     def _on_log(msg: str) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

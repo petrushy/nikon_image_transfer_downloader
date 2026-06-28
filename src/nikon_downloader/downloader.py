@@ -39,11 +39,18 @@ class Manifest:
                 )
 
     def has(self, item: ImageItem) -> bool:
-        """Whether this item is already recorded with a matching size."""
+        """Whether this item is already recorded and the file is on disk."""
         entry = self._entries.get(item.id)
         if not entry:
             return False
+        # Always verify the file still exists — manifest entries survive
+        # deletes and renames, so a missing file must be re-downloaded.
+        recorded_path = entry.get("path")
+        if recorded_path and not Path(recorded_path).exists():
+            return False
         if item.original_file_size is None:
+            # Size unavailable from the API; trust the manifest + presence
+            # check above rather than downloading unconditionally.
             return True
         return entry.get("size") == item.original_file_size
 

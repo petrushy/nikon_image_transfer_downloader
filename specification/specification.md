@@ -532,3 +532,8 @@ Supported keys correspond to the §4 environment variables:
 This uses undocumented, unsupported endpoints. Intended scope is a user downloading
 **their own** images from **their own** account for personal backup. Automated access
 may not be sanctioned by Nikon's terms of service; review before distributing.
+
+## ALSO
+make sure the README.md is continously updated with the user information, how to use the tool
+
+--dry-run should behave just as if it was "sharp" but not download or change anythin in nikon cloud. For example if skipping due to already downloaded, it should skip in --dry-run as well.

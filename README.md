@@ -119,7 +119,7 @@ Supported keys:
 |-----|---------|-------------|
 | `dest_dir` | `downloads` | Root folder for downloaded images |
 | `country` | `SE` | Country code sent to the Nikon API |
-| `file_filter` | `all` | Default file-type filter (`all`, `raw`, `jpeg`) |
+| `file_filter` | `all` | Default file-type filter for `download` and `sync` (`all`, `raw`, `jpeg`) |
 | `poll_interval` | `300` | Seconds between polls in `sync` mode |
 
 ### Environment variable reference
@@ -219,7 +219,7 @@ ID            Name              Camera       Shot Date    Type   Lifetime
 
 Lifetime colour coding: ≤ 3 days → red, ≤ 7 days → yellow.
 
-**Machine-readable output:**
+**Machine-readable output** (`--json` implies JSON format for `list`):
 
 ```bash
 nikon-downloader --json list --filter-type RAW | jq '.[].name'
@@ -459,8 +459,11 @@ downloads/
 
 | File | Contents |
 |------|----------|
-| `.state/session.json` | Captured access + refresh tokens (chmod 600) |
-| `.state/manifest.json` | Record of downloaded item IDs / sizes / paths |
+| `~/.nikon_transfer/state/session.json` | Captured access + refresh tokens (chmod 600) |
+| `~/.nikon_transfer/state/manifest.json` | Record of downloaded item IDs / sizes / paths |
+
+Override the location with `NIC_STATE_DIR` if needed (e.g. to pin state to
+the project directory: `NIC_STATE_DIR=.state`).
 
 ---
 

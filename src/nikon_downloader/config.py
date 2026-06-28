@@ -32,6 +32,7 @@ VALID_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 
 DEFAULT_CONFIG_FILE = Path.home() / ".nikon_transfer" / "config.json"
+DEFAULT_STATE_DIR = Path.home() / ".nikon_transfer" / "state"
 
 
 # ---------------------------------------------------------------------------
@@ -193,5 +194,7 @@ def load_settings(
         file_format=fmt,
         poll_interval=resolved_interval,
         headless=_env_bool("NIC_HEADLESS", False),
-        state_dir=Path(os.environ.get("NIC_STATE_DIR", ".state")),
+        state_dir=Path(
+            os.environ.get("NIC_STATE_DIR", str(DEFAULT_STATE_DIR))
+        ),
     )
